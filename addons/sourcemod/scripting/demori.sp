@@ -56,32 +56,41 @@ public void OnPluginStart()
 }
 
 /// UPDATER Stuff
-public void OnLibraryAdded(const char[] name) {
+public void OnLibraryAdded(const char[] sName) 
+{
 #if defined _updater_included
-	if( !strcmp(name, "updater") )
-		Updater_AddPlugin(UPDATE_URL);
+	if(!strcmp(sName, "updater")) 
+  {
+    Updater_AddPlugin(UPDATE_URL);
+  }
 #endif
 }
 
-public void OnAllPluginsLoaded() {
+public void OnAllPluginsLoaded() 
+{
 #if defined _updater_included
-	if( LibraryExists("updater") )
+	if (LibraryExists("updater")) 
+  {
 		Updater_AddPlugin(UPDATE_URL);
+  }
 #endif
 }
 
 #if defined _updater_included
-public Action Updater_OnPluginDownloading() {
-	if( !gCV_AutoUpdate.BoolValue ) {
+public Action Updater_OnPluginDownloading() 
+{
+	if (!gCV_AutoUpdate.BoolValue) 
+  {
 		return Plugin_Handled;
 	}
 	return Plugin_Continue;
 }
 
-public void Updater_OnPluginUpdated()  {
-	char filename[64]; GetPluginFilename(null, filename, sizeof(filename));
-	ServerCommand("sm plugins unload %s", filename);
-	ServerCommand("sm plugins load %s", filename);
+public void Updater_OnPluginUpdated()
+{
+	char sFilename[64]; GetPluginFilename(null, sFilename, sizeof(sFilename));
+	ServerCommand("sm plugins unload %s", sFilename);
+	ServerCommand("sm plugins load %s", sFilename);
 }
 #endif
 
