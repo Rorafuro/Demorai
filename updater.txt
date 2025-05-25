@@ -1,0 +1,13 @@
+"Updater" {
+  "Information" {
+    "Version" {
+      "Latest"	"1.4"
+    }
+    "Notes" "Add Updater"
+  }
+  
+  "Files" {
+    "Plugin"	"Path_SM/plugins/demori.smx"
+    "Source"	"Path_SM/scripting/demori.sp"
+  }
+}

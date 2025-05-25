@@ -5,18 +5,29 @@
 #include <sdkhooks>
 #include <tf2_stocks>
 
+#undef REQUIRE_PLUGIN
+#tryinclude <updater>
+#define REQUIRE_PLUGIN
+
+#define PLUGIN_VERSION "1.4"
+#define UPDATE_URL "https://raw.githubusercontent.com/issari-tf/Demorai/main/updater.txt"
+
+#define HALF_ZATOICHI   357
+
+#define PARTICLE_GHOST "ghost_appearation"
+#define DASH_SOUND     "Halloween.spell_teleport"
+
 public Plugin myinfo = {
   name        = "Demori",
   author      = "Koto, Aidan Sanders",
   description = "Half Demoman, Half Samurai, All Trouble.",
-  version     = "1.3",
+  version     =  PLUGIN_VERSION,
   url         = "https://github.com/issari-tf/Demorai"
 };
 
-#define HALF_ZATOICHI 357
-
-#define PARTICLE_GHOST "ghost_appearation"
-#define DASH_SOUND     "Halloween.spell_teleport"
+// ConVars
+ConVar gCV_Enable;
+ConVar gCV_AutoUpdate;
 
 // Player Data
 int g_iPlayerDashes[MAXPLAYERS];
@@ -25,6 +36,12 @@ bool g_bPlayerHasEyes[MAXPLAYERS];
 
 public void OnPluginStart()
 {
+  CreateConVar("demori_version", PLUGIN_VERSION, "Demori Version", 
+    FCVAR_PLUGIN | FCVAR_SPONLY | FCVAR_UNLOGGED | FCVAR_DONTRECORD | FCVAR_REPLICATED | FCVAR_NOTIFY);
+
+  gCV_Enable = CreateConVar("demori_enable", "1", "Enable the plugin? 1 = Enable, 0 = Disable", FCVAR_NOTIFY);
+  gCV_AutoUpdate = CreateConVar("demori_auto_update", "1", "automatically update when newest versions are available. Does nothing if updater plugin isn't used.", FCVAR_NONE, true, 0.0, true, 1.0);
+
   HookEvent("teamplay_round_start", Event_RoundStart, EventHookMode_Pre);
   HookEvent("player_hurt", Event_PlayerHurt, EventHookMode_Post);
 
@@ -38,14 +55,50 @@ public void OnPluginStart()
   }
 }
 
+/// UPDATER Stuff
+public void OnLibraryAdded(const char[] name) {
+#if defined _updater_included
+	if( !strcmp(name, "updater") )
+		Updater_AddPlugin(UPDATE_URL);
+#endif
+}
+
+public void OnAllPluginsLoaded() {
+#if defined _updater_included
+	if( LibraryExists("updater") )
+		Updater_AddPlugin(UPDATE_URL);
+#endif
+}
+
+#if defined _updater_included
+public Action Updater_OnPluginDownloading() {
+	if( !gCV_AutoUpdate.BoolValue ) {
+		return Plugin_Handled;
+	}
+	return Plugin_Continue;
+}
+
+public void Updater_OnPluginUpdated()  {
+	char filename[64]; GetPluginFilename(null, filename, sizeof(filename));
+	ServerCommand("sm plugins unload %s", filename);
+	ServerCommand("sm plugins load %s", filename);
+}
+#endif
+
 public void OnMapStart()
 {
+  if (!gCV_Enable.BoolValue)
+    return;
+  
   PrecacheParticleSystem(PARTICLE_GHOST); 
   PrecacheSound(DASH_SOUND);
 }
 
 public void OnClientPutInServer(int iClient)
 {
+  if (!gCV_Enable.BoolValue)
+    return;
+
   // Reset
   g_iPlayerDashes[iClient] = 0;
   g_bPlayerHasEyes[iClient] = false;
@@ -192,6 +245,9 @@ public Action OnPlayerRunCmd(int iClient, int &buttons, int &impulse,
                              int &subtype, int &cmdnum, int &tickcount,
                              int &seed, int mouse[2]) 
 {  
+  if (!gCV_Enable.BoolValue)
+    return Plugin_Continue;
+
   if (iClient <= 0 || iClient > MaxClients || !IsClientInGame(iClient) || !IsPlayerAlive(iClient)) 
     return Plugin_Continue;
 
@@ -217,6 +273,9 @@ public Action OnPlayerRunCmd(int iClient, int &buttons, int &impulse,
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
+  if (!gCV_Enable.BoolValue)
+    return;
+
   for (int iClient = 1; iClient <= MaxClients; iClient++)
   {
     if (IsClientInGame(iClient))
@@ -229,6 +288,9 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 
 public Action Event_PlayerHurt(Event event, const char[] sName, bool bDontBroadcast) 
 {
+  if (!gCV_Enable.BoolValue)
+    return Plugin_Continue;
+
   int iClient = GetClientOfUserId(event.GetInt("userid"));
   int iAttacker = GetClientOfUserId(event.GetInt("attacker"));
 
