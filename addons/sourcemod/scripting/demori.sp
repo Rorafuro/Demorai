@@ -9,13 +9,18 @@
 #tryinclude <updater>
 #define REQUIRE_PLUGIN
 
-#define PLUGIN_VERSION "1.4"
+#define PLUGIN_VERSION "1.5"
 #define UPDATE_URL "https://raw.githubusercontent.com/issari-tf/Demorai/main/updater.txt"
 
 #define HALF_ZATOICHI   357
 
 #define PARTICLE_GHOST "ghost_appearation"
 #define DASH_SOUND     "Halloween.spell_teleport"
+
+// Dash constants
+#define MAX_DASH_DISTANCE 384.0
+#define DASH_DAMAGE 200
+#define MAX_DASHES 3
 
 public Plugin myinfo = {
   name        = "Demori",
@@ -28,11 +33,12 @@ public Plugin myinfo = {
 // ConVars
 ConVar gCV_Enable;
 ConVar gCV_AutoUpdate;
+ConVar gCV_DashDistance;
 
 // Player Data
-int g_iPlayerDashes[MAXPLAYERS];
-int g_iPlayerLastButtons[MAXPLAYERS];
-bool g_bPlayerHasEyes[MAXPLAYERS];
+int g_iPlayerDashes[MAXPLAYERS + 1];
+int g_iPlayerLastButtons[MAXPLAYERS + 1];
+bool g_bPlayerHasEyes[MAXPLAYERS + 1];
 
 public void OnPluginStart()
 {
@@ -41,25 +47,26 @@ public void OnPluginStart()
 
   gCV_Enable = CreateConVar("demori_enable", "1", "Enable the plugin? 1 = Enable, 0 = Disable", FCVAR_NOTIFY);
   gCV_AutoUpdate = CreateConVar("demori_auto_update", "1", "automatically update when newest versions are available. Does nothing if updater plugin isn't used.", FCVAR_NONE, true, 0.0, true, 1.0);
+  gCV_DashDistance = CreateConVar("demori_dash_distance", "384.0", "Maximum dash distance in hammer units", FCVAR_NONE, true, 64.0, true, 2048.0);
 
   HookEvent("teamplay_round_start", Event_RoundStart, EventHookMode_Pre);
   HookEvent("player_hurt", Event_PlayerHurt, EventHookMode_Post);
 
-  // Incase of lateload, call client join functions
-  for (int iClient = 1; iClient <= MaxClients; iClient++) 
+  // Late load support
+  for (int i = 1; i <= MaxClients; i++) 
   {
-    if (IsClientInGame(iClient)) 
+    if (IsClientInGame(i)) 
     {
-      OnClientPutInServer(iClient);
+      OnClientPutInServer(i);
     }
   }
 }
 
-/// UPDATER Stuff
+// UPDATER Integration
 public void OnLibraryAdded(const char[] sName) 
 {
 #if defined _updater_included
-	if(!strcmp(sName, "updater")) 
+  if (!strcmp(sName, "updater")) 
   {
     Updater_AddPlugin(UPDATE_URL);
   }
@@ -69,9 +76,9 @@ public void OnLibraryAdded(const char[] sName)
 public void OnAllPluginsLoaded() 
 {
 #if defined _updater_included
-	if (LibraryExists("updater")) 
+  if (LibraryExists("updater")) 
   {
-		Updater_AddPlugin(UPDATE_URL);
+    Updater_AddPlugin(UPDATE_URL);
   }
 #endif
 }
@@ -79,18 +86,15 @@ public void OnAllPluginsLoaded()
 #if defined _updater_included
 public Action Updater_OnPluginDownloading() 
 {
-	if (!gCV_AutoUpdate.BoolValue) 
-  {
-		return Plugin_Handled;
-	}
-	return Plugin_Continue;
+  return gCV_AutoUpdate.BoolValue ? Plugin_Continue : Plugin_Handled;
 }
 
 public void Updater_OnPluginUpdated()
 {
-	char sFilename[64]; GetPluginFilename(null, sFilename, sizeof(sFilename));
-	ServerCommand("sm plugins unload %s", sFilename);
-	ServerCommand("sm plugins load %s", sFilename);
+  char sFilename[64]; 
+  GetPluginFilename(null, sFilename, sizeof(sFilename));
+  ServerCommand("sm plugins unload %s", sFilename);
+  ServerCommand("sm plugins load %s", sFilename);
 }
 #endif
 
@@ -103,180 +107,284 @@ public void OnMapStart()
   PrecacheSound(DASH_SOUND);
 }
 
-public void OnClientPutInServer(int iClient)
+public void OnClientPutInServer(int client)
 {
   if (!gCV_Enable.BoolValue)
     return;
 
-  // Reset
-  g_iPlayerDashes[iClient] = 0;
-  g_bPlayerHasEyes[iClient] = false;
+  // Reset player data
+  g_iPlayerDashes[client] = 0;
+  g_bPlayerHasEyes[client] = false;
 
-  SDKHook(iClient, SDKHook_PreThink, Client_OnThink);
+  SDKHook(client, SDKHook_PreThink, Client_OnThink);
 }
 
-public void Client_OnThink(int iClient)
+public void OnClientDisconnect(int client)
 {
-  if (!IsHoldingHalfZatoichi(iClient))
-    return;
-
-  Hud_Think(iClient);
+  // Clean up any eye glow particles
+  RemoveEyeGlow(client);
 }
 
-void Hud_Think(int iClient)
+public void Client_OnThink(int client)
 {
-  char sMessage[256];
-  int iColor[4] = {255, 255, 255, 255};
-  Format(sMessage, sizeof(sMessage), "Dashes: %d\nHit to gain a dash\nPress R to dash slice!", g_iPlayerDashes[iClient]);
-  Hud_Display(iClient, 4, sMessage, view_as<float>({-1.0, 0.77}), 0.2, iColor);
-}
-
-void Hud_Display(int iClient, int iChannel, char[] sText, float flHUD[2], float flDuration = 0.0, int iColor[4] = {255, 255, 255, 255}, int iEffect = 0, float flTime = 0.0, float flFade[2] = {0.0, 0.0})
-{
-  SetHudTextParams(flHUD[0], flHUD[1], flDuration, iColor[0], iColor[1], iColor[2], iColor[3], iEffect, flTime, flFade[0], flFade[1]);
-  ShowHudText(iClient, iChannel, sText);
-}
-
-void Client_CreateEyeGlow(int iClient)
-{
-  char sEffectName[64];
-  int iParticle = MaxClients + 1;
-  while ((iParticle = FindEntityByClassname(iParticle, "info_particle_system")) > MaxClients)
+  if (IsHoldingHalfZatoichi(client))
   {
-    if (GetEntPropEnt(iParticle, Prop_Send, "m_hOwnerEntity") != iClient)
-      continue;
-
-    GetEntPropString(iParticle, Prop_Data, "m_iszEffectName", sEffectName, sizeof(sEffectName));
-    if (strcmp(sEffectName, "halloween_boss_eye_glow") != 0)
-      continue;
-
-    RemoveEntity(iParticle);
+    Hud_Think(client);
   }
+}
 
-  char sAttachment[64];
+void Hud_Think(int client)
+{
+  char sMessage[128];
+  int iColor[4] = {0, 255, 255, 255};
+  Format(sMessage, sizeof(sMessage), "Dashes: %d/%d\nHit to gain a dash\nPress R to dash slice!", 
+         g_iPlayerDashes[client], MAX_DASHES);
+  
+  SetHudTextParams(-1.0, 0.77, 0.2, iColor[0], iColor[1], iColor[2], iColor[3]);
+  ShowHudText(client, 4, sMessage);
+}
+
+void CreateEyeGlow(int client)
+{
+  // Remove existing eye glow first
+  RemoveEyeGlow(client);
+
+  char sAttachment[16];
   for (int i = 0; i <= 1; i++)
   {
     strcopy(sAttachment, sizeof(sAttachment), (i == 0) ? "lefteye" : "righteye");
 
-    iParticle = TF2_SpawnParticle("halloween_boss_eye_glow", .iEntity = iClient, .sAttachment = sAttachment);
-    SetEntPropEnt(iParticle, Prop_Send, "m_hOwnerEntity", iClient);
+    int particle = TF2_SpawnParticle("halloween_boss_eye_glow", .entity = client, .attachment = sAttachment);
+    SetEntPropEnt(particle, Prop_Send, "m_hOwnerEntity", client);
 
-    if (GetEdictFlags(iParticle) & FL_EDICT_ALWAYS)
-       SetEdictFlags(iParticle, GetEdictFlags(iParticle) & ~FL_EDICT_ALWAYS);
+    if (GetEdictFlags(particle) & FL_EDICT_ALWAYS)
+       SetEdictFlags(particle, GetEdictFlags(particle) & ~FL_EDICT_ALWAYS);
 
-    SDKHook(iParticle, SDKHook_SetTransmit, Client_EyeGlowTransmit);
+    SDKHook(particle, SDKHook_SetTransmit, EyeGlow_SetTransmit);
   }
 }
 
-Action Client_EyeGlowTransmit(int iEntity, int iClient)
+void RemoveEyeGlow(int client)
 {
-  if (GetEdictFlags(iEntity) & FL_EDICT_ALWAYS)
-     SetEdictFlags(iEntity, GetEdictFlags(iEntity) & ~FL_EDICT_ALWAYS);
+  char sEffectName[64];
+  int particle = MaxClients + 1;
+  
+  while ((particle = FindEntityByClassname(particle, "info_particle_system")) > MaxClients)
+  {
+    if (GetEntPropEnt(particle, Prop_Send, "m_hOwnerEntity") != client)
+      continue;
 
-  int iOwner = GetEntPropEnt(iEntity, Prop_Send, "m_hOwnerEntity");
-  if (iOwner <= 0 || iOwner > MaxClients || !IsClientInGame(iOwner))
-	{
-    RemoveEntity(iEntity);
+    GetEntPropString(particle, Prop_Data, "m_iszEffectName", sEffectName, sizeof(sEffectName));
+    if (strcmp(sEffectName, "halloween_boss_eye_glow") == 0)
+    {
+      RemoveEntity(particle);
+    }
+  }
+}
+
+Action EyeGlow_SetTransmit(int entity, int client)
+{
+  if (GetEdictFlags(entity) & FL_EDICT_ALWAYS)
+     SetEdictFlags(entity, GetEdictFlags(entity) & ~FL_EDICT_ALWAYS);
+
+  int owner = GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity");
+  if (owner <= 0 || owner > MaxClients || !IsClientInGame(owner))
+  {
+    RemoveEntity(entity);
     return Plugin_Handled;
   }
 
-  if (iClient == iOwner && GetEntProp(iClient, Prop_Send, "m_nForceTauntCam") == 0)
+  // Hide from owner unless in taunt cam
+  if (client == owner && GetEntProp(client, Prop_Send, "m_nForceTauntCam") == 0)
     return Plugin_Handled;
 
-  if (!IsPlayerAlive(iClient) && GetEntPropEnt(iClient, Prop_Send, "m_hObserverTarget") == iOwner)
+  // Hide from spectator in first person
+  if (!IsPlayerAlive(client) && GetEntPropEnt(client, Prop_Send, "m_hObserverTarget") == owner)
   {
-    if (GetEntProp(iClient, Prop_Send, "m_iObserverMode") == 4)	//SPEC_MODE_FIRSTPERSON
+    if (GetEntProp(client, Prop_Send, "m_iObserverMode") == 4) // SPEC_MODE_FIRSTPERSON
       return Plugin_Handled;
   }
 
   return Plugin_Continue;
 }
 
-void PerformTeleport(int iClient)
+bool TraceFilter_IgnorePlayers(int entity, int mask, int data)
 {
-  float vecEyePos[3], vecAng[3];
-  GetClientEyePosition(iClient, vecEyePos);
-  GetClientEyeAngles(iClient, vecAng);
-
-  TR_TraceRayFilter(vecEyePos, vecAng, MASK_PLAYERSOLID, 
-                    RayType_Infinite, TraceRay_DontHitEntity, 
-                    iClient);
-  if (!TR_DidHit())
-    return;
-
-  float vecEndPos[3];
-  TR_GetEndPosition(vecEndPos);
-  
-  float vecOrigin[3], vecMins[3], vecMaxs[3];
-  GetClientAbsOrigin(iClient, vecOrigin);
-  GetClientMins(iClient, vecMins);
-  GetClientMaxs(iClient, vecMaxs);
-
-  // Create particle -> original position
-  CreateTimer(3.0, Timer_EntityCleanup, TF2_SpawnParticle(PARTICLE_GHOST, vecOrigin, vecAng));
-
-  // If trace heading downward, prevent that because mins/maxs hitbox
-  if (vecEndPos[2] < vecOrigin[2])
-    vecEndPos[2] = vecOrigin[2];
-
-  // Find spot from player's eye
-  TR_TraceHullFilter(vecOrigin, vecEndPos, vecMins, vecMaxs,
-                     MASK_PLAYERSOLID, TraceRay_DontHitEntity, 
-                     iClient);
-  TR_GetEndPosition(vecEndPos);
-
-  // Find the floor
-  TR_TraceRayFilter(vecEndPos, view_as<float>({ 90.0, 0.0, 0.0 }), 
-                    MASK_PLAYERSOLID, RayType_Infinite, TraceRay_DontHitEntity, 
-                    iClient);
-  if (!TR_DidHit())
-    return;
-
-  float vecFloorPos[3];
-  TR_GetEndPosition(vecFloorPos);
-  TR_TraceHullFilter(vecEndPos, vecFloorPos, vecMins, vecMaxs, 
-                     MASK_PLAYERSOLID, TraceRay_DontHitEntity, 
-                     iClient);
-  TR_GetEndPosition(vecEndPos);
-
-  // Create particle -> new position
-  CreateTimer(3.0, Timer_EntityCleanup, TF2_SpawnParticle(PARTICLE_GHOST, vecEndPos, vecAng));
-
-  // Play a sound
-  EmitGameSoundToAll(DASH_SOUND, iClient);
-
-  // Teleport Client
-  TeleportEntity(iClient, vecEndPos, NULL_VECTOR, NULL_VECTOR);
+  // Don't hit the dasher or any players
+  return (entity != data && (entity < 1 || entity > MaxClients));
 }
 
-public Action OnPlayerRunCmd(int iClient, int &buttons, int &impulse, 
-                             float vel[3], float angles[3], int &weapon,
-                             int &subtype, int &cmdnum, int &tickcount,
-                             int &seed, int mouse[2]) 
-{  
-  if (!gCV_Enable.BoolValue)
-    return Plugin_Continue;
+void PerformTeleport(int client)
+{
+  float eyePos[3], angles[3];
+  GetClientEyePosition(client, eyePos);
+  GetClientEyeAngles(client, angles);
 
-  if (iClient <= 0 || iClient > MaxClients || !IsClientInGame(iClient) || !IsPlayerAlive(iClient)) 
-    return Plugin_Continue;
-
-  if (g_iPlayerDashes[iClient] > 0 
-   && IsHoldingHalfZatoichi(iClient) 
-   && (buttons & IN_RELOAD) != 0 
-   && g_iPlayerLastButtons[iClient] != buttons)
+  // Calculate direction and max end position
+  float direction[3];
+  GetAngleVectors(angles, direction, NULL_VECTOR, NULL_VECTOR);
+  
+  float maxDistance = gCV_DashDistance.FloatValue;
+  float maxEndPos[3];
+  for (int i = 0; i < 3; i++)
   {
-    // Deny teleporting when stunned
-    if (TF2_IsPlayerInCondition(iClient, TFCond_Dazed))
-    {
-      PrintHintText(iClient, "Can't teleport when stunned.");
-      return Plugin_Continue;
-    }
-
-    g_iPlayerDashes[iClient]--;
-    PerformTeleport(iClient);
+    maxEndPos[i] = eyePos[i] + (direction[i] * maxDistance);
   }
 
-  g_iPlayerLastButtons[iClient] = buttons;
+  // Trace ray with limited distance, ignoring players
+  TR_TraceRayFilter(eyePos, maxEndPos, MASK_PLAYERSOLID, 
+                    RayType_EndPoint, TraceFilter_IgnorePlayers, client);
+  
+  float endPos[3];
+  if (!TR_DidHit())
+  {
+    // Use max distance if no collision
+    endPos = maxEndPos;
+  }
+  else
+  {
+    TR_GetEndPosition(endPos);
+  }
+  
+  float origin[3], mins[3], maxs[3];
+  GetClientAbsOrigin(client, origin);
+  GetClientMins(client, mins);
+  GetClientMaxs(client, maxs);
+
+  // Spawn ghost particle at original position
+  CreateTimer(3.0, Timer_EntityCleanup, TF2_SpawnParticle(PARTICLE_GHOST, origin, angles));
+
+  // Prevent downward teleports
+  if (endPos[2] < origin[2])
+    endPos[2] = origin[2];
+
+  // Hull trace for player collision
+  TR_TraceHullFilter(origin, endPos, mins, maxs, MASK_PLAYERSOLID, TraceFilter_IgnorePlayers, client);
+  TR_GetEndPosition(endPos);
+
+  // Find the floor
+  float floorAngles[3] = {90.0, 0.0, 0.0};
+  TR_TraceRayFilter(endPos, floorAngles, MASK_PLAYERSOLID, RayType_Infinite, TraceFilter_IgnorePlayers, client);
+  
+  if (TR_DidHit())
+  {
+    float floorPos[3];
+    TR_GetEndPosition(floorPos);
+    TR_TraceHullFilter(endPos, floorPos, mins, maxs, MASK_PLAYERSOLID, TraceFilter_IgnorePlayers, client);
+    TR_GetEndPosition(endPos);
+  }
+
+  // Damage enemies along the dash path
+  DamagePlayersAlongPath(client, origin, endPos);
+
+  // Spawn ghost particle at new position
+  CreateTimer(3.0, Timer_EntityCleanup, TF2_SpawnParticle(PARTICLE_GHOST, endPos, angles));
+
+  // Play sound and teleport
+  EmitGameSoundToAll(DASH_SOUND, client);
+  TeleportEntity(client, endPos, NULL_VECTOR, NULL_VECTOR);
+}
+
+void DamagePlayersAlongPath(int client, float start[3], float end[3])
+{
+  int clientTeam = GetClientTeam(client);
+  int hitPlayers = 0;
+  
+  for (int target = 1; target <= MaxClients; target++)
+  {
+    if (!IsClientInGame(target) || !IsPlayerAlive(target) || target == client)
+      continue;
+      
+    // Skip teammates
+    if (GetClientTeam(target) == clientTeam)
+      continue;
+    
+    float targetPos[3], targetMins[3], targetMaxs[3];
+    GetClientAbsOrigin(target, targetPos);
+    GetClientMins(target, targetMins);
+    GetClientMaxs(target, targetMaxs);
+    
+    // Convert to world coordinates
+    for (int i = 0; i < 3; i++)
+    {
+      targetMins[i] += targetPos[i];
+      targetMaxs[i] += targetPos[i];
+    }
+    
+    // Check if dash path intersects with target
+    if (IsLineIntersectingBox(start, end, targetMins, targetMaxs))
+    {
+      // Deal damage
+      int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+      SDKHooks_TakeDamage(target, client, client, float(DASH_DAMAGE), DMG_SLASH, weapon);
+      
+      hitPlayers++;
+      
+      // Create hit effect
+      CreateTimer(2.0, Timer_EntityCleanup, TF2_SpawnParticle("crit_text", targetPos));
+    }
+  }
+  
+  if (hitPlayers > 0)
+  {
+    PrintHintText(client, "Dash Strike! Hit %d enemies", hitPlayers);
+  }
+}
+
+bool IsLineIntersectingBox(float lineStart[3], float lineEnd[3], float boxMin[3], float boxMax[3])
+{
+  float tMin = 0.0, tMax = 1.0;
+  
+  for (int i = 0; i < 3; i++)
+  {
+    float dir = lineEnd[i] - lineStart[i];
+    if (dir == 0.0) continue; // Parallel to axis
+    
+    float invDir = 1.0 / dir;
+    float t1 = (boxMin[i] - lineStart[i]) * invDir;
+    float t2 = (boxMax[i] - lineStart[i]) * invDir;
+    
+    if (invDir < 0.0)
+    {
+      float temp = t1;
+      t1 = t2;
+      t2 = temp;
+    }
+    
+    if (t1 > tMin) tMin = t1;
+    if (t2 < tMax) tMax = t2;
+    
+    if (tMin > tMax) return false;
+  }
+  
+  return true;
+}
+
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, 
+                            float vel[3], float angles[3], int &weapon,
+                            int &subtype, int &cmdnum, int &tickcount,
+                            int &seed, int mouse[2]) 
+{  
+  if (!gCV_Enable.BoolValue || !IsClientInGame(client) || !IsPlayerAlive(client))
+    return Plugin_Continue;
+
+  // Check for dash input
+  if (g_iPlayerDashes[client] > 0 && IsHoldingHalfZatoichi(client) && 
+      (buttons & IN_RELOAD) && !(g_iPlayerLastButtons[client] & IN_RELOAD))
+  {
+    // Prevent dashing when stunned
+    if (TF2_IsPlayerInCondition(client, TFCond_Dazed))
+    {
+      PrintHintText(client, "Can't teleport when stunned.");
+    }
+    else
+    {
+      g_iPlayerDashes[client]--;
+      PerformTeleport(client);
+    }
+  }
+
+  g_iPlayerLastButtons[client] = buttons;
   return Plugin_Continue;
 }
 
@@ -285,97 +393,105 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
   if (!gCV_Enable.BoolValue)
     return;
 
-  for (int iClient = 1; iClient <= MaxClients; iClient++)
+  // Reset all player data
+  for (int i = 1; i <= MaxClients; i++)
   {
-    if (IsClientInGame(iClient))
+    if (IsClientInGame(i))
     {
-      g_iPlayerDashes[iClient] = 0;
-      g_bPlayerHasEyes[iClient] = false;
+      g_iPlayerDashes[i] = 0;
+      g_bPlayerHasEyes[i] = false;
+      RemoveEyeGlow(i);
     }
   }
 }
 
-public Action Event_PlayerHurt(Event event, const char[] sName, bool bDontBroadcast) 
+public Action Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast) 
 {
   if (!gCV_Enable.BoolValue)
     return Plugin_Continue;
 
-  int iClient = GetClientOfUserId(event.GetInt("userid"));
-  int iAttacker = GetClientOfUserId(event.GetInt("attacker"));
+  int victim = GetClientOfUserId(event.GetInt("userid"));
+  int attacker = GetClientOfUserId(event.GetInt("attacker"));
 
-  if (0 < iAttacker <= MaxClients && IsClientInGame(iAttacker) && iClient != iAttacker)
+  if (attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && 
+      victim != attacker && IsHoldingHalfZatoichi(attacker))
   {
-    if (IsHoldingHalfZatoichi(iAttacker))
+    // Grant dash charge (up to maximum)
+    if (g_iPlayerDashes[attacker] < MAX_DASHES)
     {
-      g_iPlayerDashes[iAttacker]++;
-      if (g_iPlayerDashes[iAttacker] != 0 && !g_bPlayerHasEyes[iAttacker])
-      {
-        Client_CreateEyeGlow(iAttacker);
-        g_bPlayerHasEyes[iAttacker] = true;
-      }
+      g_iPlayerDashes[attacker]++;
+    }
+    
+    // Create eye glow effect
+    if (g_iPlayerDashes[attacker] > 0 && !g_bPlayerHasEyes[attacker])
+    {
+      CreateEyeGlow(attacker);
+      g_bPlayerHasEyes[attacker] = true;
     }
   }
 
   return Plugin_Continue;
 }
 
-public Action Timer_EntityCleanup(Handle hTimer, int iRef)
+public Action Timer_EntityCleanup(Handle timer, int entityRef)
 {
-  int iEntity = EntRefToEntIndex(iRef);
-  if(iEntity > MaxClients)
-    AcceptEntityInput(iEntity, "Kill");
+  int entity = EntRefToEntIndex(entityRef);
+  if (entity > MaxClients && IsValidEntity(entity))
+  {
+    AcceptEntityInput(entity, "Kill");
+  }
   return Plugin_Handled;
 }
 
-stock int TF2_SpawnParticle(char[] sParticle, float vecOrigin[3] = NULL_VECTOR, float vecAngles[3] = NULL_VECTOR, bool bActivate = true, int iEntity = 0, int iControlPoint = 0, const char[] sAttachment = "", const char[] sAttachmentOffset = "")
+stock int TF2_SpawnParticle(const char[] particle, float origin[3] = NULL_VECTOR, 
+                           float angles[3] = NULL_VECTOR, bool activate = true, 
+                           int entity = 0, int controlPoint = 0, 
+                           const char[] attachment = "", const char[] attachmentOffset = "")
 {
-  int iParticle = CreateEntityByName("info_particle_system");
-  TeleportEntity(iParticle, vecOrigin, vecAngles, NULL_VECTOR);
-  DispatchKeyValue(iParticle, "effect_name", sParticle);
-  DispatchSpawn(iParticle);
+  int particleEntity = CreateEntityByName("info_particle_system");
+  TeleportEntity(particleEntity, origin, angles, NULL_VECTOR);
+  DispatchKeyValue(particleEntity, "effect_name", particle);
+  DispatchSpawn(particleEntity);
   
-  if (0 < iEntity && IsValidEntity(iEntity))
+  if (entity > 0 && IsValidEntity(entity))
   {
     SetVariantString("!activator");
-    AcceptEntityInput(iParticle, "SetParent", iEntity);
+    AcceptEntityInput(particleEntity, "SetParent", entity);
 
-    if (sAttachment[0])
+    if (attachment[0])
     {
-      SetVariantString(sAttachment);
-      AcceptEntityInput(iParticle, "SetParentAttachment", iParticle);
+      SetVariantString(attachment);
+      AcceptEntityInput(particleEntity, "SetParentAttachment", particleEntity);
     }
     
-    if (sAttachmentOffset[0])
+    if (attachmentOffset[0])
     {
-      SetVariantString(sAttachmentOffset);
-      AcceptEntityInput(iParticle, "SetParentAttachmentMaintainOffset", iParticle);
+      SetVariantString(attachmentOffset);
+      AcceptEntityInput(particleEntity, "SetParentAttachmentMaintainOffset", particleEntity);
     }
   }
   
-  if (0 < iControlPoint && IsValidEntity(iControlPoint))
+  if (controlPoint > 0 && IsValidEntity(controlPoint))
   {
-    //Array netprop, but really only need element 0 anyway
-    SetEntPropEnt(iParticle, Prop_Send, "m_hControlPointEnts", iControlPoint, 0);
-    SetEntProp(iParticle, Prop_Send, "m_iControlPointParents", iControlPoint, _, 0);
+    SetEntPropEnt(particleEntity, Prop_Send, "m_hControlPointEnts", controlPoint, 0);
+    SetEntProp(particleEntity, Prop_Send, "m_iControlPointParents", controlPoint, _, 0);
   }
   
-  if (bActivate)
+  if (activate)
   {
-    ActivateEntity(iParticle);
-    AcceptEntityInput(iParticle, "Start");
+    ActivateEntity(particleEntity);
+    AcceptEntityInput(particleEntity, "Start");
   }
   
-  //Return ref of entity
-  return EntIndexToEntRef(iParticle);
+  return EntIndexToEntRef(particleEntity);
 }
 
-stock bool IsHoldingHalfZatoichi(int iClient) 
+stock bool IsHoldingHalfZatoichi(int client) 
 {
-  int iWeapon = GetEntPropEnt(iClient, Prop_Send, "m_hActiveWeapon");
-  if (iWeapon > MaxClients && IsValidEntity(iWeapon)) 
+  int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+  if (weapon > MaxClients && IsValidEntity(weapon)) 
   {
-    int iIndex = GetEntProp(iWeapon, Prop_Send, "m_iItemDefinitionIndex");
-    return iIndex == HALF_ZATOICHI;
+    return GetEntProp(weapon, Prop_Send, "m_iItemDefinitionIndex") == HALF_ZATOICHI;
   }
   return false;
 }
@@ -385,7 +501,8 @@ stock int PrecacheParticleSystem(const char[] particleSystem)
   static int particleEffectNames = INVALID_STRING_TABLE;
   if (particleEffectNames == INVALID_STRING_TABLE)
   {
-    if ((particleEffectNames = FindStringTable("ParticleEffectNames")) == INVALID_STRING_TABLE)
+    particleEffectNames = FindStringTable("ParticleEffectNames");
+    if (particleEffectNames == INVALID_STRING_TABLE)
     {
       return INVALID_STRING_INDEX;
     }
@@ -421,9 +538,4 @@ stock int FindStringIndex2(int tableidx, const char[] str)
   }
 
   return INVALID_STRING_INDEX;
-}
-
-stock bool TraceRay_DontHitEntity(int iEntity, int iMask, int iData)
-{
-  return iEntity != iData;
 }
